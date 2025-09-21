@@ -1,0 +1,277 @@
+substitutions:
+  devicename: open-tds
+  tds_name: "TDS Sensor"
+
+esphome:
+  name: $devicename
+
+esp8266:
+  board: nodemcuv2
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    sensor: DEBUG
+
+# Enable Home Assistant API
+api:
+  password: ""
+  services:
+    - service: log_readings
+      then:
+        - logger.log:
+            format: "Manual log - Voltage: %.3f V, TDS: %.1f ppm"
+            args:
+              - 'id(tds_voltage).state'
+              - 'id(tds_value).state'
+            level: INFO
+
+ota:
+  - platform: esphome
+    password: ""
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${devicename} Hotspot"
+    password: !secret wifi_hotspot_pwd
+
+captive_portal:
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: ESP IP Address
+      id: ip_add
+    ssid:
+      name: ESP Connected SSID
+    bssid:
+      name: ESP Connected BSSID
+
+# TDS Sensor Configuration
+sensor:
+  - platform: adc
+    pin: A0
+    name: "${tds_name} Raw ADC"
+    id: tds_raw_adc
+    update_interval: 40ms  # Sample every 40ms like the example
+    internal: true
+    
+  - platform: template
+    name: "${tds_name} Voltage"
+    id: tds_voltage
+    unit_of_measurement: "V"
+    update_interval: 800ms  # Update every 800ms like the example
+    lambda: |-
+      // Get median filtered voltage value
+      static float analogBuffer[30];
+      static int bufferIndex = 0;
+      static unsigned long lastSampleTime = 0;
+      
+      unsigned long currentTime = millis();
+      
+      // Sample every 40ms
+      if (currentTime - lastSampleTime >= 40) {
+        lastSampleTime = currentTime;
+        analogBuffer[bufferIndex] = id(tds_raw_adc).state;
+        bufferIndex++;
+        if (bufferIndex >= 30) bufferIndex = 0;
+      }
+      
+      // Calculate median
+      float tempBuffer[30];
+      for (int i = 0; i < 30; i++) {
+        tempBuffer[i] = analogBuffer[i];
+      }
+      
+      // Simple bubble sort for median
+      for (int j = 0; j < 29; j++) {
+        for (int i = 0; i < 29 - j; i++) {
+          if (tempBuffer[i] > tempBuffer[i + 1]) {
+            float temp = tempBuffer[i];
+            tempBuffer[i] = tempBuffer[i + 1];
+            tempBuffer[i + 1] = temp;
+          }
+        }
+      }
+      
+      float medianValue = tempBuffer[15];  // Middle value for 30 samples
+      
+      // Convert to voltage (3.3V reference for ESP8266, 10-bit ADC)
+      float voltage = medianValue * 3.3 / 1024.0;
+      
+      return voltage;
+    on_value:
+      then:
+        - logger.log:
+            format: "Voltage: %.3f V"
+            args: ['x']
+            level: INFO
+
+  - platform: template
+    name: "${tds_name}"
+    id: tds_value
+    unit_of_measurement: "ppm"
+    icon: "mdi:water-opacity"
+    update_interval: 800ms  # Update every 800ms like the example
+    lambda: |-
+      float voltage = id(tds_voltage).state;
+      float temperature = 25.0;  // Default temperature, can be replaced with actual temp sensor
+      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+      float compensationVoltage = voltage / compensationCoefficient;
+      
+      // TDS calculation - exact formula from the example
+      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                   255.86 * compensationVoltage * compensationVoltage + 
+                   857.39 * compensationVoltage) * 0.5;
+      
+      if (tds < 0) tds = 0;
+      if (tds > 2000) tds = 2000;  // Cap at reasonable maximum
+      
+      return tds;
+    filters:
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 1
+    on_value:
+      then:
+        - logger.log:
+            format: "TDS: %.1f ppm, Quality: %s"
+            args: 
+              - 'x'
+              - 'x < 50 ? "Excellent" : x < 150 ? "Good" : x < 250 ? "Fair" : x < 350 ? "Poor" : "Unacceptable"'
+            level: INFO
+
+  - platform: template
+    name: "${tds_name} Water Quality"
+    id: water_quality
+    update_interval: 5s
+    lambda: |-
+      float tds = id(tds_value).state;
+      if (tds < 50) return 1;        // Excellent
+      else if (tds < 150) return 2;  // Good
+      else if (tds < 250) return 3;  // Fair
+      else if (tds < 350) return 4;  // Poor
+      else return 5;                 // Unacceptable
+
+# Buzzer for alerts
+output:
+  - platform: esp8266_pwm
+    pin: D1
+    id: rtttl_out
+
+rtttl:
+  output: rtttl_out
+  on_finished_playback:
+    - logger.log: 'Alert ended!'
+
+# OLED Display
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Australia/Brisbane
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+
+i2c:
+  sda: D3
+  scl: D5
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_md
+    size: 12
+  - file: "gfonts://Roboto"
+    id: font_sm
+    size: 10
+  - file: "gfonts://Roboto"
+    id: font_lg
+    size: 20
+
+color:
+  - id: light_red
+    red: 100%
+    green: 20%
+    blue: 25%
+  - id: light_green
+    red: 0%
+    green: 100%
+    blue: 25%
+  - id: light_yellow
+    red: 100%
+    green: 100%
+    blue: 0%
+  - id: light_blue
+    red: 25%
+    green: 50%
+    blue: 100%
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      // Title
+      it.printf(64, 0, id(font_md), id(light_blue), TextAlign::TOP_CENTER, "TDS Monitor");
+      
+      // TDS Value
+      it.printf(64, 16, id(font_lg), TextAlign::TOP_CENTER, "%.0f ppm", id(tds_value).state);
+      
+      // Water Quality
+      auto quality_color = id(light_green);
+      const char* quality_text = "Unknown";
+      
+      int quality = (int)id(water_quality).state;
+      switch(quality) {
+        case 1:
+          quality_text = "Excellent";
+          quality_color = id(light_green);
+          break;
+        case 2:
+          quality_text = "Good";
+          quality_color = id(light_green);
+          break;
+        case 3:
+          quality_text = "Fair";
+          quality_color = id(light_yellow);
+          break;
+        case 4:
+          quality_text = "Poor";
+          quality_color = id(light_red);
+          break;
+        case 5:
+          quality_text = "Unacceptable";
+          quality_color = id(light_red);
+          break;
+      }
+      
+      it.printf(64, 38, id(font_md), quality_color, TextAlign::TOP_CENTER, "%s", quality_text);
+      
+      // Bottom info
+      it.printf(2, 54, id(font_sm), TextAlign::TOP_LEFT, "%s", id(ip_add).state.c_str());
+      it.printf(126, 54, id(font_sm), TextAlign::TOP_RIGHT, "V1.0");
+
+# Alert when water quality is poor
+interval:
+  - interval: 30s
+    then:
+      - logger.log:
+          format: "Periodic check - TDS: %.1f ppm, Voltage: %.3f V, Quality Level: %.0f"
+          args:
+            - 'id(tds_value).state'
+            - 'id(tds_voltage).state'
+            - 'id(water_quality).state'
+          level: INFO
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(water_quality).state >= 4;'
+          then:
+            - rtttl.play: 'alert:d=4,o=5,b=100:16e6,16e6,16e6'
