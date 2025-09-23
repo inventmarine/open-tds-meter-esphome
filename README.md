@@ -1,6 +1,9 @@
 # ESP8266 TDS Water Monitor
 
-A comprehensive ESP8266-based water quality monitoring system using ESPHome. This project monitors Total Dissolved Solids (TDS) in water and integrates with Home Assistant.
+A TDS meter using ESPHome. It monitors Total Dissolved Solids (TDS) in water and integrates with Home Assistant.
+All parts sourced from AliExpress/Amazon/eBay.
+
+**Status:** Under development.
 
 ## Features
 
@@ -15,12 +18,9 @@ A comprehensive ESP8266-based water quality monitoring system using ESPHome. Thi
 ## Hardware Requirements
 
 ### Main Components
-- **ESP8266 Development Board** (NodeMCU V2)
-- **Gravity TDS Meter** (Analog TDS sensor)
+- **ESP32 Development Board** 
+- **Gravity or DFRobot TDS Meter** (Analog TDS sensor)
 - **OLED Display** (SSD1306 128x64)
-- **Buzzer** for alerts
-- **Breadboard and jumper wires**
-- **USB cable** for programming and power
 
 ## Wiring Diagram
 
@@ -29,7 +29,7 @@ ESP8266                  TDS Sensor
 -------                  ----------
 3.3V     --------------> VCC
 GND      --------------> GND
-A0       --------------> Analog Output
+GPI33    --------------> Analog Output
 
 ESP8266                  OLED Display (I2C)
 -------                  -----------------
@@ -38,10 +38,6 @@ GND      --------------> GND
 D3       --------------> SDA
 D5       --------------> SCL
 
-ESP8266                  Buzzer
--------                  ------
-D1       --------------> Positive
-GND      --------------> Negative
 ```
 
 ## Software Setup
@@ -79,6 +75,7 @@ GND      --------------> Negative
 
 5. **Upload the Code**
    ```bash
+   esphome compile open-tds.yaml
    esphome upload open-tds.yaml --device /dev/cu.SLAB_USBtoUART
    ```
    Or if you have multiple devices connected:
@@ -88,14 +85,16 @@ GND      --------------> Negative
    ```
 
 6. **Monitor Logs**
-   ```bash
-   esphome logs open-tds.yaml
+   ```bash   
+   esphome logs open-tds.yaml --device open-tds.local
    ```
 
- ## Build & upload firmware
+## Using Docker
+Alternativelly, one can use ESPHome in Docker to develop and test 
+ 1.  **Build & upload firmware**
     `docker run --rm -v "${PWD}":/config -it esphome/esphome run open-tds.yaml --device open-tds.local`
 
- ## ESPHome Dashboard
+ 2. **ESPHome Dashboard**
     ```
     docker run --rm -p 6052:6052 -v "${PWD}":/config -it esphome/esphome dashboard config/
     open http://localhost:6052/
@@ -103,35 +102,47 @@ GND      --------------> Negative
 
 ## Usage
 
-### Basic Operation
-1. Power on the ESP8266
-2. The device will automatically connect to WiFi
-3. TDS readings will be displayed on the OLED screen
-4. The device will be automatically discovered by Home Assistant
+### Calibration Instructions
 
-### OLED Display Information
-- **Top**: "TDS Monitor" title
-- **Center**: Current TDS value in ppm
-- **Quality Status**: Excellent/Good/Fair/Poor/Unacceptable with color coding
-- **Bottom**: IP address and firmware version
+The TDS sensor requires calibration for accurate readings. The system supports calibration using a reference TDS solution.
 
-### Water Quality Categories
-- **Excellent**: < 50 ppm (Green)
-- **Good**: 50-150 ppm (Green)
-- **Fair**: 150-250 ppm (Yellow)
-- **Poor**: 250-350 ppm (Red)
-- **Unacceptable**: > 350 ppm (Red)
+#### What You'll Need
+- A calibration solution with known TDS value (e.g., 1413 ppm standard solution)
+- Clean the sensor probe before calibration
+- Allow the sensor to stabilize in the solution for 2-3 minutes
 
-### Alert System
-- The buzzer will sound every 30 seconds when water quality is Poor or Unacceptable
+#### Calibration Steps
 
-## TDS Sensor Calibration
+1. **Via Home Assistant**:
+   - Navigate to your device in Home Assistant
+   - Find the calibration controls:
+     - `TDS Calibration Reference (ppm)` - Set to your solution's TDS value
+     - `Calibration Sensor Select` - Choose which sensor to use for calibration (1 or 2)
+   - Place the selected sensor in your calibration solution
+   - Wait 2-3 minutes for readings to stabilize
+   - Click the `Calibrate TDS Sensors` button
+   - The system will calculate and apply the new K-value to both sensors
 
-The TDS calculation uses a polynomial formula with temperature compensation:
-```
-TDS = (133.42 * V³ - 255.86 * V² + 857.39 * V) * 0.5
-```
-Where V is the compensated voltage.
+2. **Via Web Interface**:
+   - Access the device's web interface at `http://open-tds.local`
+   - Use the same calibration controls as above
+
+3. **Understanding K-Value**:
+   - The K-value is a calibration coefficient that compensates for sensor variations
+   - Default K-value is 1.0
+   - After calibration, both sensors will use the same K-value
+   - The K-value is saved and persists through power cycles
+   - You can reset to default calibration using the `Reset TDS Calibration` button
+
+#### Calibration Tips
+- Calibrate when first setting up the sensors
+- Recalibrate if readings seem inaccurate
+- Use a calibration solution close to your expected measurement range
+- Common calibration solutions:
+  - 342 ppm (KCl solution)
+  - 1413 ppm (NaCl solution)
+  - 2764 ppm (High range solution)
+- Clean sensors with distilled water before and after calibration
 
 ## Home Assistant Integration
 
@@ -140,54 +151,3 @@ The device will automatically appear in Home Assistant with the following entiti
 - `sensor.tds_sensor_raw` - Raw voltage reading
 - `sensor.tds_sensor_water_quality` - Quality rating (1-5)
 
-## Troubleshooting
-
-### Common Issues
-
-1. **WiFi Connection Failed**
-   - Check WiFi credentials in `secrets.yaml`
-   - Ensure WiFi network is 2.4GHz (ESP8266 doesn't support 5GHz)
-   - Check signal strength
-
-2. **ESPHome Command Not Found**
-   - Make sure you've activated the virtual environment
-   - Reinstall ESPHome: `pip install esphome`
-
-3. **Upload Failed**
-   - Check USB cable connection
-   - Try different USB port
-   - Verify the correct device port (e.g., /dev/cu.SLAB_USBtoUART)
-
-4. **Inaccurate TDS Readings**
-   - Ensure sensor is properly connected to A0 pin
-   - Check for stable 3.3V power supply
-   - Allow sensor to stabilize in water for 30 seconds
-
-## Project Structure
-
-```
-open-tds-monitor/
-├── open-tds.yaml           # ESPHome configuration
-├── secrets.yaml            # WiFi credentials (keep private)
-├── platformio.ini          # Legacy PlatformIO config (not used)
-└── README.md               # This file
-```
-
-## License
-
-This project is open source. Feel free to modify and distribute according to your needs.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
-
-## Support
-
-For technical support or questions:
-- Check the troubleshooting section above
-- Review the ESPHome documentation
-- Open an issue in the project repository
-
----
-
-**Note**: This project is designed for educational and monitoring purposes. For critical applications, ensure proper calibration and validation of readings.

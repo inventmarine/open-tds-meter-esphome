@@ -1,12 +1,21 @@
 substitutions:
   devicename: open-tds
-  tds_name: "TDS Sensor"
+  tds_name_1: "TDS Sensor 1"
+  tds_name_2: "TDS Sensor 2"
+  # Voltage divider ratio - adjust based on your setup:
+  # 1.0 = No divider (sensor outputs 0-1V)
+  # 2.32 = 10kΩ + 4.7kΩ resistors (14.7/4.7 = 3.128, but use measured value)
+  # 2.5 = 15kΩ + 10kΩ resistors
+  voltage_divider_1: "2.32"
+  voltage_divider_2: "2.32"
 
 esphome:
   name: $devicename
 
-esp8266:
-  board: nodemcuv2
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
 
 # Enable logging
 logger:
@@ -17,15 +26,6 @@ logger:
 # Enable Home Assistant API
 api:
   password: ""
-  services:
-    - service: log_readings
-      then:
-        - logger.log:
-            format: "Manual log - Voltage: %.3f V, TDS: %.1f ppm"
-            args:
-              - 'id(tds_voltage).state'
-              - 'id(tds_value).state'
-            level: INFO
 
 ota:
   - platform: esphome
@@ -42,6 +42,21 @@ wifi:
 
 captive_portal:
 
+# Global variables for calibration
+globals:
+  - id: k_value
+    type: float
+    restore_value: yes
+    initial_value: '1.0'  # Shared K-value for both sensors
+  - id: calibration_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: calibration_sensor
+    type: int
+    restore_value: no
+    initial_value: '1'  # Which sensor to use for calibration (1 or 2)
+
 text_sensor:
   - platform: wifi_info
     ip_address:
@@ -52,146 +67,149 @@ text_sensor:
     bssid:
       name: ESP Connected BSSID
 
-# TDS Sensor Configuration
 sensor:
+  # Raw ADC reading - Sensor 1
   - platform: adc
-    pin: A0
-    name: "${tds_name} Raw ADC"
-    id: tds_raw_adc
-    update_interval: 40ms  # Sample every 40ms like the example
-    internal: true
-    
-  - platform: template
-    name: "${tds_name} Voltage"
-    id: tds_voltage
-    unit_of_measurement: "V"
-    update_interval: 800ms  # Update every 800ms like the example
-    lambda: |-
-      // Get median filtered voltage value
-      static float analogBuffer[30];
-      static int bufferIndex = 0;
-      static unsigned long lastSampleTime = 0;
-      
-      unsigned long currentTime = millis();
-      
-      // Sample every 40ms
-      if (currentTime - lastSampleTime >= 40) {
-        lastSampleTime = currentTime;
-        analogBuffer[bufferIndex] = id(tds_raw_adc).state;
-        bufferIndex++;
-        if (bufferIndex >= 30) bufferIndex = 0;
-      }
-      
-      // Calculate median
-      float tempBuffer[30];
-      for (int i = 0; i < 30; i++) {
-        tempBuffer[i] = analogBuffer[i];
-      }
-      
-      // Simple bubble sort for median
-      for (int j = 0; j < 29; j++) {
-        for (int i = 0; i < 29 - j; i++) {
-          if (tempBuffer[i] > tempBuffer[i + 1]) {
-            float temp = tempBuffer[i];
-            tempBuffer[i] = tempBuffer[i + 1];
-            tempBuffer[i + 1] = temp;
-          }
-        }
-      }
-      
-      float medianValue = tempBuffer[15];  // Middle value for 30 samples
-      
-      // Convert to voltage (3.3V reference for ESP8266, 10-bit ADC)
-      float voltage = medianValue * 3.3 / 1024.0;
-      
-      return voltage;
+    pin: GPIO33
+    name: "${tds_name_1} Raw ADC"
+    id: tds_raw_1
+    attenuation: 12db
+    update_interval: 500ms
     on_value:
       then:
         - logger.log:
-            format: "Voltage: %.3f V"
+            format: "Sensor 1 ADC: Raw=%d, Voltage=%.3fV"
+            args:
+              - 'int(x * 4095.0 / 3.3)'
+              - 'x'
+            level: INFO
+
+  # Raw ADC reading - Sensor 2
+  - platform: adc
+    pin: GPIO32
+    name: "${tds_name_2} Raw ADC"
+    id: tds_raw_2
+    attenuation: 12db
+    update_interval: 500ms
+    on_value:
+      then:
+        - logger.log:
+            format: "Sensor 2 ADC: Raw=%d, Voltage=%.3fV"
+            args:
+              - 'int(x * 4095.0 / 3.3)'
+              - 'x'
+            level: INFO
+
+  # Direct voltage reading - Sensor 1
+  - platform: template
+    name: "${tds_name_1} Voltage"
+    id: tds_voltage_1
+    unit_of_measurement: "V"
+    update_interval: 3s
+    lambda: |-
+      return id(tds_raw_1).state;
+    on_value:
+      then:
+        - logger.log:
+            format: "Sensor 1 Voltage: %.3f V"
             args: ['x']
             level: INFO
 
+  # Direct voltage reading - Sensor 2
   - platform: template
-    name: "${tds_name}"
-    id: tds_value
-    unit_of_measurement: "ppm"
-    icon: "mdi:water-opacity"
-    update_interval: 800ms  # Update every 800ms like the example
+    name: "${tds_name_2} Voltage"
+    id: tds_voltage_2
+    unit_of_measurement: "V"
+    update_interval: 1s
     lambda: |-
-      float voltage = id(tds_voltage).state;
-      float temperature = 25.0;  // Default temperature, can be replaced with actual temp sensor
-      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-      float compensationVoltage = voltage / compensationCoefficient;
-      
-      // TDS calculation - exact formula from the example
-      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
-                   255.86 * compensationVoltage * compensationVoltage + 
-                   857.39 * compensationVoltage) * 0.5;
-      
-      if (tds < 0) tds = 0;
-      if (tds > 2000) tds = 2000;  // Cap at reasonable maximum
-      
-      return tds;
-    filters:
-      - sliding_window_moving_average:
-          window_size: 10
-          send_every: 1
+      return id(tds_raw_2).state;
     on_value:
       then:
         - logger.log:
-            format: "TDS: %.1f ppm, Quality: %s"
-            args: 
-              - 'x'
-              - 'x < 50 ? "Excellent" : x < 150 ? "Good" : x < 250 ? "Fair" : x < 350 ? "Poor" : "Unacceptable"'
+            format: "Sensor 2 Voltage: %.3f V"
+            args: ['x']
             level: INFO
 
+  # TDS calculation with calibration - Sensor 1
   - platform: template
-    name: "${tds_name} Water Quality"
-    id: water_quality
+    name: "${tds_name_1}"
+    id: tds_direct_1
+    unit_of_measurement: "ppm"
+    icon: "mdi:water-opacity"
+    update_interval: 1s
+    lambda: |-
+      float voltage = id(tds_voltage_1).state;
+      float temperature = 25.0;
+      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+      float compensationVoltage = voltage / compensationCoefficient;
+      
+      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                   255.86 * compensationVoltage * compensationVoltage + 
+                   857.39 * compensationVoltage) * id(k_value) * 0.5;
+      
+      if (tds < 0) tds = 0;
+      if (tds > 2000) tds = 2000;
+      
+      ESP_LOGI("tds1", "TDS1: V=%.3f, K=%.3f, TDS=%.1f ppm", voltage, id(k_value), tds);
+      
+      return tds;
+
+  # TDS calculation with calibration - Sensor 2
+  - platform: template
+    name: "${tds_name_2}"
+    id: tds_direct_2
+    unit_of_measurement: "ppm"
+    icon: "mdi:water-opacity"
+    update_interval: 1s
+    lambda: |-
+      float voltage = id(tds_voltage_2).state;
+      float temperature = 25.0;
+      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+      float compensationVoltage = voltage / compensationCoefficient;
+      
+      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                   255.86 * compensationVoltage * compensationVoltage + 
+                   857.39 * compensationVoltage) * id(k_value) * 0.5;
+      
+      if (tds < 0) tds = 0;
+      if (tds > 2000) tds = 2000;
+      
+      ESP_LOGI("tds2", "TDS2: V=%.3f, K=%.3f, TDS=%.1f ppm", voltage, id(k_value), tds);
+      
+      return tds;
+
+  # K-value sensor for monitoring (shared by both sensors)
+  - platform: template
+    name: "TDS K-Value"
+    id: k_value_sensor
+    unit_of_measurement: ""
+    accuracy_decimals: 3
     update_interval: 5s
     lambda: |-
-      float tds = id(tds_value).state;
-      if (tds < 50) return 1;        // Excellent
-      else if (tds < 150) return 2;  // Good
-      else if (tds < 250) return 3;  // Fair
-      else if (tds < 350) return 4;  // Poor
-      else return 5;                 // Unacceptable
+      return id(k_value);
 
-# Buzzer for alerts
-output:
-  - platform: esp8266_pwm
-    pin: D1
-    id: rtttl_out
-
-rtttl:
-  output: rtttl_out
-  on_finished_playback:
-    - logger.log: 'Alert ended!'
 
 # OLED Display
-time:
-  - platform: sntp
-    id: sntp_time
-    timezone: Australia/Brisbane
-    servers:
-      - 0.pool.ntp.org
-      - 1.pool.ntp.org
-      - 2.pool.ntp.org
-
 i2c:
-  sda: D3
-  scl: D5
+  sda: GPIO21
+  scl: GPIO22
+  frequency: 400kHz
 
 font:
   - file: "gfonts://Roboto"
-    id: font_md
-    size: 12
+    id: font_xs
+    size: 8
   - file: "gfonts://Roboto"
     id: font_sm
     size: 10
   - file: "gfonts://Roboto"
+    id: font_md
+    size: 12
+  - file: "gfonts://Roboto"
     id: font_lg
+    size: 16
+  - file: "gfonts://Roboto"
+    id: font_xl
     size: 20
 
 color:
@@ -212,66 +230,171 @@ color:
     green: 50%
     blue: 100%
 
+
 display:
   - platform: ssd1306_i2c
     model: "SSD1306 128x64"
     address: 0x3C
+    update_interval: 500ms
     lambda: |-
       // Title
-      it.printf(64, 0, id(font_md), id(light_blue), TextAlign::TOP_CENTER, "TDS Monitor");
-      
-      // TDS Value
-      it.printf(64, 16, id(font_lg), TextAlign::TOP_CENTER, "%.0f ppm", id(tds_value).state);
-      
-      // Water Quality
-      auto quality_color = id(light_green);
-      const char* quality_text = "Unknown";
-      
-      int quality = (int)id(water_quality).state;
-      switch(quality) {
-        case 1:
-          quality_text = "Excellent";
-          quality_color = id(light_green);
-          break;
-        case 2:
-          quality_text = "Good";
-          quality_color = id(light_green);
-          break;
-        case 3:
-          quality_text = "Fair";
-          quality_color = id(light_yellow);
-          break;
-        case 4:
-          quality_text = "Poor";
-          quality_color = id(light_red);
-          break;
-        case 5:
-          quality_text = "Unacceptable";
-          quality_color = id(light_red);
-          break;
+      if (id(calibration_in_progress)) {
+        it.printf(64, 0, id(font_md), TextAlign::TOP_CENTER, "CALIBRATING...");
+      } else {
+        it.printf(64, 0, id(font_md), TextAlign::TOP_CENTER, "TDS MONITOR");
       }
       
-      it.printf(64, 38, id(font_md), quality_color, TextAlign::TOP_CENTER, "%s", quality_text);
+      // Draw vertical divider line (half height, centered)
+      it.line(64, 16, 64, 48);
       
-      // Bottom info
-      it.printf(2, 54, id(font_sm), TextAlign::TOP_LEFT, "%s", id(ip_add).state.c_str());
-      it.printf(126, 54, id(font_sm), TextAlign::TOP_RIGHT, "V1.0");
+      // Sensor 1 - Left side
+      it.printf(32, 20, id(font_xl), TextAlign::TOP_CENTER, "%.0f", id(tds_direct_1).state);
+      it.printf(32, 40, id(font_sm), TextAlign::TOP_CENTER, "ppm");
+      it.printf(32, 54, id(font_xs), TextAlign::TOP_CENTER, "Before");
+      
+      // Sensor 2 - Right side
+      it.printf(96, 20, id(font_xl), TextAlign::TOP_CENTER, "%.0f", id(tds_direct_2).state);
+      it.printf(96, 40, id(font_sm), TextAlign::TOP_CENTER, "ppm");
+      it.printf(96, 54, id(font_xs), TextAlign::TOP_CENTER, "After");
+      
+#      // Status line 1
+#      if (id(tds_voltage_1).state < 0.05) {
+#        it.printf(0, 44, id(font_sm), "S1: CHECK!");
+#      } else if (id(tds_direct_1).state < 50) {
+#        it.printf(0, 44, id(font_sm), "S1: Excellent");
+#      } else if (id(tds_direct_1).state < 150) {
+#        it.printf(0, 44, id(font_sm), "S1: Good");
+#      } else if (id(tds_direct_1).state < 250) {
+#        it.printf(0, 44, id(font_sm), "S1: Fair");
+#      } else {
+#        it.printf(0, 44, id(font_sm), "S1: Poor");
+#      }
+#
+#      // Status line 2
+#      if (id(tds_voltage_2).state < 0.05) {
+#        it.printf(0, 54, id(font_sm), "S2: CHECK!");
+#      } else if (id(tds_direct_2).state < 50) {
+#        it.printf(0, 54, id(font_sm), "S2: Excellent");
+#      } else if (id(tds_direct_2).state < 150) {
+#        it.printf(0, 54, id(font_sm), "S2: Good");
+#      } else if (id(tds_direct_2).state < 250) {
+#        it.printf(0, 54, id(font_sm), "S2: Fair");
+#      } else {
+#        it.printf(0, 54, id(font_sm), "S2: Poor");
+#      }
 
-# Alert when water quality is poor
+# Status LED (built-in on most ESP32 boards)
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: status_led
+
+# Diagnostic info every 5 seconds
 interval:
-  - interval: 30s
+  - interval: 5s
     then:
       - logger.log:
-          format: "Periodic check - TDS: %.1f ppm, Voltage: %.3f V, Quality Level: %.0f"
+          format: "\n========== TDS DIAGNOSTIC ==========\nSENSOR 1:\n  RAW ADC: %d / 4095\n  Voltage: %.3f V\n  TDS: %.1f ppm\n\nSENSOR 2:\n  RAW ADC: %d / 4095\n  Voltage: %.3f V\n  TDS: %.1f ppm\n\nCONNECTIONS:\n1. VCC -> ESP32 5V\n2. GND -> ESP32 GND\n3. Sensor1 -> GPIO33\n4. Sensor2 -> GPIO32\n===================================="
           args:
-            - 'id(tds_value).state'
-            - 'id(tds_voltage).state'
-            - 'id(water_quality).state'
-          level: INFO
-  - interval: 30s
-    then:
+            - 'int(id(tds_raw_1).state * 4095.0 / 3.3)'
+            - 'id(tds_voltage_1).state'
+            - 'id(tds_direct_1).state'
+            - 'int(id(tds_raw_2).state * 4095.0 / 3.3)'
+            - 'id(tds_voltage_2).state'
+            - 'id(tds_direct_2).state'
+          level: WARN
+
+      # Blink LED based on readings
       - if:
           condition:
-            lambda: 'return id(water_quality).state >= 4;'
+            lambda: 'return id(tds_voltage_1).state < 0.1 || id(tds_voltage_2).state < 0.1;'
           then:
-            - rtttl.play: 'alert:d=4,o=5,b=100:16e6,16e6,16e6'
+            # Fast blink for very low reading
+            - output.turn_on: status_led
+            - delay: 100ms
+            - output.turn_off: status_led
+            - logger.log: "WARNING: Very low reading! Check wiring!"
+          else:
+            # Normal blink
+            - output.turn_on: status_led
+            - delay: 500ms
+            - output.turn_off: status_led
+
+# Web server for easy debugging
+web_server:
+  port: 80
+
+# Calibration inputs and controls
+number:
+  - platform: template
+    name: "TDS Calibration Reference (ppm)"
+    id: calibration_reference
+    min_value: 0
+    max_value: 2000
+    step: 1
+    initial_value: 1413  # Common calibration solution
+    restore_value: yes
+    unit_of_measurement: "ppm"
+    optimistic: true
+    
+  - platform: template
+    name: "Calibration Sensor Select"
+    id: calibration_sensor_select
+    min_value: 1
+    max_value: 2
+    step: 1
+    initial_value: 1
+    optimistic: true
+    on_value:
+      then:
+        - globals.set:
+            id: calibration_sensor
+            value: !lambda 'return int(x);'
+
+button:
+  - platform: template
+    name: "Calibrate TDS Sensors"
+    id: calibrate_button
+    on_press:
+      then:
+        - globals.set:
+            id: calibration_in_progress
+            value: 'true'
+        - logger.log:
+            format: "Starting calibration using Sensor %d with reference: %.0f ppm"
+            args: ['id(calibration_sensor)', 'id(calibration_reference).state']
+            level: INFO
+        - delay: 3s  # Allow readings to stabilize
+        - lambda: |-
+            // Get voltage reading from selected sensor
+            float voltage = id(calibration_sensor) == 1 ? id(tds_voltage_1).state : id(tds_voltage_2).state;
+            float temperature = 25.0;
+            float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+            float compensationVoltage = voltage / compensationCoefficient;
+            
+            // Calculate raw EC value without K
+            float rawEC = 133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                          255.86 * compensationVoltage * compensationVoltage + 
+                          857.39 * compensationVoltage;
+            
+            // Calculate new K-value
+            float referenceEC = id(calibration_reference).state / 0.5;  // Convert ppm to EC
+            if (rawEC > 0) {
+              id(k_value) = referenceEC / rawEC;
+              ESP_LOGI("calibration", "Calibration complete. New K-value: %.3f (applied to both sensors)", id(k_value));
+            } else {
+              ESP_LOGE("calibration", "Invalid reading from Sensor %d. Calibration failed.", id(calibration_sensor));
+            }
+        - globals.set:
+            id: calibration_in_progress
+            value: 'false'
+            
+  - platform: template
+    name: "Reset TDS Calibration"
+    id: reset_calibration_button
+    on_press:
+      then:
+        - globals.set:
+            id: k_value
+            value: '1.0'
+        - logger.log: "TDS calibration reset to default (K=1.0) for both sensors"
