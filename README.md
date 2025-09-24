@@ -3,7 +3,7 @@
 A TDS meter using ESPHome. It monitors Total Dissolved Solids (TDS) in water and integrates with Home Assistant.
 All parts sourced from AliExpress/Amazon/eBay.
 
-**Status:** Under development.
+
 
 ## Features
 
@@ -12,31 +12,35 @@ All parts sourced from AliExpress/Amazon/eBay.
 - **WiFi Connectivity**: Wireless data transmission
 - **Home Assistant Integration**: Automatic discovery and integration
 - **OLED Display**: Real-time display of TDS value and water quality
-- **Alert System**: Audio alerts when water quality is poor
-- **Water Quality Rating**: Categorizes water quality from Excellent to Unacceptable
 
 ## Hardware Requirements
 
 ### Main Components
 - **ESP32 Development Board** 
-- **Gravity or DFRobot TDS Meter** (Analog TDS sensor)
+- **Gravity or DFRobot TDS Meter** (Analog TDS sensor x2)
 - **OLED Display** (SSD1306 128x64)
 
 ## Wiring Diagram
 
 ```
-ESP8266                  TDS Sensor
--------                  ----------
-3.3V     --------------> VCC
+ESP32                    TDS Sensor 1
+-----                    ------------
+3.3V/5V  --------------> VCC
 GND      --------------> GND
-GPI33    --------------> Analog Output
+GPIO33   --------------> Analog Output
 
-ESP8266                  OLED Display (I2C)
--------                  -----------------
+ESP32                    TDS Sensor 2
+-----                    ------------
+3.3V/5V  --------------> VCC
+GND      --------------> GND
+GPIO32   --------------> Analog Output
+
+ESP32                    OLED Display (I2C)
+-----                    -----------------
 3.3V     --------------> VCC
 GND      --------------> GND
-D3       --------------> SDA
-D5       --------------> SCL
+GPIO21   --------------> SDA
+GPIO22   --------------> SCL
 
 ```
 
@@ -84,9 +88,9 @@ D5       --------------> SCL
    # Then select the appropriate USB port when prompted
    ```
 
-6. **Monitor Logs**
+6. **Monitor Logs (Deployment)**
    ```bash   
-   esphome logs open-tds.yaml --device open-tds.local
+   source venv/bin/activate && esphome logs open-tds.yaml --device open-tds.local
    ```
 
 ## Using Docker
@@ -107,7 +111,7 @@ Alternativelly, one can use ESPHome in Docker to develop and test
 The TDS sensor requires calibration for accurate readings. The system supports calibration using a reference TDS solution.
 
 #### What You'll Need
-- A calibration solution with known TDS value (e.g., 1413 ppm standard solution)
+- A calibration solution with known TDS value (e.g 90 ppm standard solution)
 - Clean the sensor probe before calibration
 - Allow the sensor to stabilize in the solution for 2-3 minutes
 
@@ -116,12 +120,12 @@ The TDS sensor requires calibration for accurate readings. The system supports c
 1. **Via Home Assistant**:
    - Navigate to your device in Home Assistant
    - Find the calibration controls:
-     - `TDS Calibration Reference (ppm)` - Set to your solution's TDS value
-     - `Calibration Sensor Select` - Choose which sensor to use for calibration (1 or 2)
+     - `TDS Cal Reference - Sensor 1 (ppm)` - Set to your solution's TDS value for sensor 1
+     - `TDS Cal Reference - Sensor 2 (ppm)` - Set to your solution's TDS value for sensor 2
    - Place the selected sensor in your calibration solution
    - Wait 2-3 minutes for readings to stabilize
-   - Click the `Calibrate TDS Sensors` button
-   - The system will calculate and apply the new K-value to both sensors
+   - Click the `Calibrate TDS Sensor 1` or `Calibrate TDS Sensor 2` button
+   - The system will calculate and apply the new K-value to the selected sensor
 
 2. **Via Web Interface**:
    - Access the device's web interface at `http://open-tds.local`
@@ -130,7 +134,7 @@ The TDS sensor requires calibration for accurate readings. The system supports c
 3. **Understanding K-Value**:
    - The K-value is a calibration coefficient that compensates for sensor variations
    - Default K-value is 1.0
-   - After calibration, both sensors will use the same K-value
+   - After calibration, each sensor maintains its own K-value
    - The K-value is saved and persists through power cycles
    - You can reset to default calibration using the `Reset TDS Calibration` button
 
@@ -147,7 +151,11 @@ The TDS sensor requires calibration for accurate readings. The system supports c
 ## Home Assistant Integration
 
 The device will automatically appear in Home Assistant with the following entities:
-- `sensor.tds_sensor` - Current TDS value in ppm
-- `sensor.tds_sensor_raw` - Raw voltage reading
-- `sensor.tds_sensor_water_quality` - Quality rating (1-5)
+- `sensor.tds_sensor_1` - TDS value for sensor 1 in ppm
+- `sensor.tds_sensor_2` - TDS value for sensor 2 in ppm
+- `sensor.tds_sensor_1_voltage` - Voltage reading for sensor 1
+- `sensor.tds_sensor_2_voltage` - Voltage reading for sensor 2
+- `sensor.tds_k_value_sensor_1` - Calibration K-value for sensor 1
+- `sensor.tds_k_value_sensor_2` - Calibration K-value for sensor 2
+- Various calibration and diagnostic controls
 
