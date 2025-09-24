@@ -17,8 +17,12 @@ All parts sourced from AliExpress/Amazon/eBay.
 
 ### Main Components
 - **ESP32 Development Board** 
-- **Gravity or DFRobot TDS Meter** (Analog TDS sensor x2)
-- **OLED Display** (SSD1306 128x64)
+- **TDS Sensor** (Analog TDS sensor x2) - Choose one:
+  - [DFRobot Gravity Analog TDS Sensor](https://www.dfrobot.com/product-1662.html) (SKU: SEN0244)
+  - [Generic TDS Meter Module](https://www.aliexpress.com/item/1005001698342637.html) - Compatible alternative
+- **OLED Display** - 0.96" 128x64 I2C:
+  - [SSD1306 OLED Display](https://www.aliexpress.com/item/1005007614149117.html) 
+  - Any SSD1306-based 128x64 I2C OLED display module
 
 ## Wiring Diagram
 
