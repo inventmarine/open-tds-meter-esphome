@@ -21,7 +21,7 @@ esp32:
 logger:
   level: DEBUG
   logs:
-    sensor: DEBUG
+    sensor: WARN
 
 # Enable Home Assistant API
 api:
@@ -44,18 +44,18 @@ captive_portal:
 
 # Global variables for calibration
 globals:
-  - id: k_value
+  - id: k_value_1
     type: float
     restore_value: yes
-    initial_value: '1.0'  # Shared K-value for both sensors
-  - id: calibration_in_progress
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: calibration_sensor
-    type: int
-    restore_value: no
-    initial_value: '1'  # Which sensor to use for calibration (1 or 2)
+    initial_value: '1.0'  # K-value for sensor 1
+  - id: k_value_2
+    type: float
+    restore_value: yes
+    initial_value: '1.0'  # K-value for sensor 2
+  - id: water_temperature
+    type: float
+    restore_value: yes
+    initial_value: '19.0'  # Default water temperature in Celsius
 
 text_sensor:
   - platform: wifi_info
@@ -75,6 +75,10 @@ sensor:
     id: tds_raw_1
     attenuation: 12db
     update_interval: 500ms
+    filters:
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 2
     on_value:
       then:
         - logger.log:
@@ -91,6 +95,10 @@ sensor:
     id: tds_raw_2
     attenuation: 12db
     update_interval: 500ms
+    filters:
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 2
     on_value:
       then:
         - logger.log:
@@ -130,7 +138,7 @@ sensor:
             args: ['x']
             level: INFO
 
-  # TDS calculation with calibration - Sensor 1
+  # TDS calculation with linear formula - Sensor 1
   - platform: template
     name: "${tds_name_1}"
     id: tds_direct_1
@@ -138,23 +146,30 @@ sensor:
     icon: "mdi:water-opacity"
     update_interval: 1s
     lambda: |-
-      float voltage = id(tds_voltage_1).state;
-      float temperature = 25.0;
-      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-      float compensationVoltage = voltage / compensationCoefficient;
+      float adc_voltage = id(tds_voltage_1).state;
+      float actual_voltage = adc_voltage * ${voltage_divider_1};
       
-      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
-                   255.86 * compensationVoltage * compensationVoltage + 
-                   857.39 * compensationVoltage) * id(k_value) * 0.5;
+      // Linear formula based on calibration points:
+      // 3ppm @ 0.329V, 90ppm @ 0.487V (updated based on actual measurements)
+      // Slope = (90-3)/(0.487-0.329) = 550.6 ppm/V
+      // Offset = 3 - 550.6*0.329 = -178.0
+      float slope = 550.6;
+      float offset = -178.0;
+      float tds = slope * actual_voltage + offset;
+      
+      // Apply individual K-value calibration if needed
+      tds = tds * id(k_value_1);
       
       if (tds < 0) tds = 0;
       if (tds > 2000) tds = 2000;
       
-      ESP_LOGI("tds1", "TDS1: V=%.3f, K=%.3f, TDS=%.1f ppm", voltage, id(k_value), tds);
+      float raw_linear = slope * actual_voltage + offset;
+      ESP_LOGI("tds1", "TDS1: ADC=%.3f, V=%.3f, RawLinear=%.1f, K=%.3f, Final=%.1f ppm", 
+               adc_voltage, actual_voltage, raw_linear, id(k_value_1), tds);
       
       return tds;
 
-  # TDS calculation with calibration - Sensor 2
+  # TDS calculation with linear formula - Sensor 2
   - platform: template
     name: "${tds_name_2}"
     id: tds_direct_2
@@ -162,31 +177,113 @@ sensor:
     icon: "mdi:water-opacity"
     update_interval: 1s
     lambda: |-
-      float voltage = id(tds_voltage_2).state;
-      float temperature = 25.0;
-      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-      float compensationVoltage = voltage / compensationCoefficient;
+      float adc_voltage = id(tds_voltage_2).state;
+      float actual_voltage = adc_voltage * ${voltage_divider_2};
       
-      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
-                   255.86 * compensationVoltage * compensationVoltage + 
-                   857.39 * compensationVoltage) * id(k_value) * 0.5;
+      // Linear formula based on calibration points:
+      // 3ppm @ 0.329V, 90ppm @ 0.487V (updated based on actual measurements)
+      // Slope = (90-3)/(0.487-0.329) = 550.6 ppm/V
+      // Offset = 3 - 550.6*0.329 = -178.0
+      float slope = 550.6;
+      float offset = -178.0;
+      float tds = slope * actual_voltage + offset;
+      
+      // Apply individual K-value calibration if needed
+      tds = tds * id(k_value_2);
       
       if (tds < 0) tds = 0;
       if (tds > 2000) tds = 2000;
       
-      ESP_LOGI("tds2", "TDS2: V=%.3f, K=%.3f, TDS=%.1f ppm", voltage, id(k_value), tds);
+      float raw_linear = slope * actual_voltage + offset;
+      ESP_LOGI("tds2", "TDS2: ADC=%.3f, V=%.3f, RawLinear=%.1f, K=%.3f, Final=%.1f ppm", 
+               adc_voltage, actual_voltage, raw_linear, id(k_value_2), tds);
       
       return tds;
 
-  # K-value sensor for monitoring (shared by both sensors)
+  # K-value sensor for monitoring - Sensor 1
   - platform: template
-    name: "TDS K-Value"
-    id: k_value_sensor
+    name: "TDS K-Value Sensor 1"
+    id: k_value_sensor_1
     unit_of_measurement: ""
     accuracy_decimals: 3
     update_interval: 5s
     lambda: |-
-      return id(k_value);
+      return id(k_value_1);
+      
+  # K-value sensor for monitoring - Sensor 2
+  - platform: template
+    name: "TDS K-Value Sensor 2"
+    id: k_value_sensor_2
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+    update_interval: 5s
+    lambda: |-
+      return id(k_value_2);
+      
+  # Raw TDS without calibration - Sensor 1
+  - platform: template
+    name: "${tds_name_1} Raw (No Cal)"
+    id: tds_raw_uncal_1
+    unit_of_measurement: "ppm"
+    icon: "mdi:water-opacity"
+    update_interval: 1s
+    lambda: |-
+      float adc_voltage = id(tds_voltage_1).state;
+      float actual_voltage = adc_voltage * ${voltage_divider_1};
+      float temperature = id(water_temperature);
+      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+      float compensationVoltage = actual_voltage / compensationCoefficient;
+      
+      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                   255.86 * compensationVoltage * compensationVoltage + 
+                   857.39 * compensationVoltage) * 0.5;
+      
+      if (tds < 0) tds = 0;
+      if (tds > 2000) tds = 2000;
+      
+      return tds;
+      
+  # Raw TDS without calibration - Sensor 2
+  - platform: template
+    name: "${tds_name_2} Raw (No Cal)"
+    id: tds_raw_uncal_2
+    unit_of_measurement: "ppm"
+    icon: "mdi:water-opacity"
+    update_interval: 1s
+    lambda: |-
+      float adc_voltage = id(tds_voltage_2).state;
+      float actual_voltage = adc_voltage * ${voltage_divider_2};
+      float temperature = id(water_temperature);
+      float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+      float compensationVoltage = actual_voltage / compensationCoefficient;
+      
+      float tds = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
+                   255.86 * compensationVoltage * compensationVoltage + 
+                   857.39 * compensationVoltage) * 0.5;
+      
+      if (tds < 0) tds = 0;
+      if (tds > 2000) tds = 2000;
+      
+      return tds;
+      
+  # Voltage test sensors - show actual voltages for debugging
+  - platform: template
+    name: "${tds_name_1} Actual Voltage"
+    id: voltage_actual_1
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: 2s
+    lambda: |-
+      return id(tds_voltage_1).state * ${voltage_divider_1};
+      
+  - platform: template
+    name: "${tds_name_2} Actual Voltage"
+    id: voltage_actual_2
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: 2s
+    lambda: |-
+      return id(tds_voltage_2).state * ${voltage_divider_2};
 
 
 # OLED Display
@@ -238,24 +335,20 @@ display:
     update_interval: 500ms
     lambda: |-
       // Title
-      if (id(calibration_in_progress)) {
-        it.printf(64, 0, id(font_md), TextAlign::TOP_CENTER, "CALIBRATING...");
-      } else {
-        it.printf(64, 0, id(font_md), TextAlign::TOP_CENTER, "TDS MONITOR");
-      }
+      it.printf(64, 0, id(font_md), TextAlign::TOP_CENTER, "TDS MONITOR");
       
       // Draw vertical divider line (half height, centered)
-      it.line(64, 16, 64, 48);
+      it.line(64, 20, 64, 48);
       
       // Sensor 1 - Left side
       it.printf(32, 20, id(font_xl), TextAlign::TOP_CENTER, "%.0f", id(tds_direct_1).state);
       it.printf(32, 40, id(font_sm), TextAlign::TOP_CENTER, "ppm");
-      it.printf(32, 54, id(font_xs), TextAlign::TOP_CENTER, "Before");
+      it.printf(32, 54, id(font_sm), TextAlign::TOP_CENTER, "Before");
       
       // Sensor 2 - Right side
       it.printf(96, 20, id(font_xl), TextAlign::TOP_CENTER, "%.0f", id(tds_direct_2).state);
       it.printf(96, 40, id(font_sm), TextAlign::TOP_CENTER, "ppm");
-      it.printf(96, 54, id(font_xs), TextAlign::TOP_CENTER, "After");
+      it.printf(96, 54, id(font_sm), TextAlign::TOP_CENTER, "After");
       
 #      // Status line 1
 #      if (id(tds_voltage_1).state < 0.05) {
@@ -327,74 +420,102 @@ web_server:
 # Calibration inputs and controls
 number:
   - platform: template
-    name: "TDS Calibration Reference (ppm)"
-    id: calibration_reference
+    name: "TDS Cal Reference - Sensor 1 (ppm)"
+    id: calibration_reference_1
     min_value: 0
     max_value: 2000
     step: 1
-    initial_value: 1413  # Common calibration solution
+    initial_value: 90  # Your calibration solution
     restore_value: yes
     unit_of_measurement: "ppm"
     optimistic: true
     
   - platform: template
-    name: "Calibration Sensor Select"
-    id: calibration_sensor_select
-    min_value: 1
-    max_value: 2
+    name: "TDS Cal Reference - Sensor 2 (ppm)"
+    id: calibration_reference_2
+    min_value: 0
+    max_value: 2000
     step: 1
-    initial_value: 1
+    initial_value: 90  # Your calibration solution
+    restore_value: yes
+    unit_of_measurement: "ppm"
     optimistic: true
-    on_value:
-      then:
-        - globals.set:
-            id: calibration_sensor
-            value: !lambda 'return int(x);'
 
 button:
   - platform: template
-    name: "Calibrate TDS Sensors"
-    id: calibrate_button
+    name: "Calibrate TDS Sensor 1"
+    id: calibrate_button_1
     on_press:
       then:
-        - globals.set:
-            id: calibration_in_progress
-            value: 'true'
         - logger.log:
-            format: "Starting calibration using Sensor %d with reference: %.0f ppm"
-            args: ['id(calibration_sensor)', 'id(calibration_reference).state']
+            format: "Starting calibration for Sensor 1 with reference: %.0f ppm"
+            args: ['id(calibration_reference_1).state']
             level: INFO
-        - delay: 3s  # Allow readings to stabilize
+        - delay: 2s  # Allow readings to stabilize
         - lambda: |-
-            // Get voltage reading from selected sensor
-            float voltage = id(calibration_sensor) == 1 ? id(tds_voltage_1).state : id(tds_voltage_2).state;
-            float temperature = 25.0;
-            float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-            float compensationVoltage = voltage / compensationCoefficient;
+            float adc_voltage = id(tds_voltage_1).state;
+            float actual_voltage = adc_voltage * ${voltage_divider_1};
             
-            // Calculate raw EC value without K
-            float rawEC = 133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 
-                          255.86 * compensationVoltage * compensationVoltage + 
-                          857.39 * compensationVoltage;
+            // Linear formula calibration
+            float slope = 654.1;
+            float offset = -212.3;
+            float measured_tds = slope * actual_voltage + offset;
             
-            // Calculate new K-value
-            float referenceEC = id(calibration_reference).state / 0.5;  // Convert ppm to EC
-            if (rawEC > 0) {
-              id(k_value) = referenceEC / rawEC;
-              ESP_LOGI("calibration", "Calibration complete. New K-value: %.3f (applied to both sensors)", id(k_value));
+            // Calculate K-value as correction factor
+            float reference_tds = id(calibration_reference_1).state;
+            if (measured_tds > 0) {
+              id(k_value_1) = reference_tds / measured_tds;
+              ESP_LOGI("cal", "Sensor 1 calibration: V=%.3f, Measured=%.1f ppm, Reference=%.1f ppm, K=%.3f", 
+                       actual_voltage, measured_tds, reference_tds, id(k_value_1));
             } else {
-              ESP_LOGE("calibration", "Invalid reading from Sensor %d. Calibration failed.", id(calibration_sensor));
+              ESP_LOGE("cal", "Invalid reading from Sensor 1. Calibration failed.");
             }
-        - globals.set:
-            id: calibration_in_progress
-            value: 'false'
             
   - platform: template
-    name: "Reset TDS Calibration"
-    id: reset_calibration_button
+    name: "Calibrate TDS Sensor 2"
+    id: calibrate_button_2
+    on_press:
+      then:
+        - logger.log:
+            format: "Starting calibration for Sensor 2 with reference: %.0f ppm"
+            args: ['id(calibration_reference_2).state']
+            level: INFO
+        - delay: 2s  # Allow readings to stabilize
+        - lambda: |-
+            float adc_voltage = id(tds_voltage_2).state;
+            float actual_voltage = adc_voltage * ${voltage_divider_2};
+            
+            // Linear formula calibration
+            float slope = 654.1;
+            float offset = -212.3;
+            float measured_tds = slope * actual_voltage + offset;
+            
+            // Calculate K-value as correction factor
+            float reference_tds = id(calibration_reference_2).state;
+            if (measured_tds > 0) {
+              id(k_value_2) = reference_tds / measured_tds;
+              ESP_LOGI("cal", "Sensor 2 calibration: V=%.3f, Measured=%.1f ppm, Reference=%.1f ppm, K=%.3f", 
+                       actual_voltage, measured_tds, reference_tds, id(k_value_2));
+            } else {
+              ESP_LOGE("cal", "Invalid reading from Sensor 2. Calibration failed.");
+            }
+            
+  - platform: template
+    name: "Reset TDS Calibration - Sensor 1"
+    id: reset_calibration_button_1
     on_press:
       then:
         - globals.set:
-            id: k_value
+            id: k_value_1
             value: '1.0'
-        - logger.log: "TDS calibration reset to default (K=1.0) for both sensors"
+        - logger.log: "TDS calibration reset to default (K=1.0) for Sensor 1"
+        
+  - platform: template
+    name: "Reset TDS Calibration - Sensor 2"
+    id: reset_calibration_button_2
+    on_press:
+      then:
+        - globals.set:
+            id: k_value_2
+            value: '1.0'
+        - logger.log: "TDS calibration reset to default (K=1.0) for Sensor 2"
